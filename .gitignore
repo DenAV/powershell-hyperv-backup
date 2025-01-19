@@ -1,5 +1,14 @@
 # Ignore credential files
-psw-storage.txt
+pwd-storage.txt
 
 # Ignore configuration files
 backup-hpv.ini
+
+# Ignore log paths
+logs/*
+
+# Ignore input files
+input/*
+
+# Remove exception for .gitkeep
+!.gitkeep
