@@ -1,0 +1,24 @@
+; Backup-HPV V3.0
+; Date 15.01.2025 DenAV
+[local]
+; Local backup repository and restore points
+history     = 1
+directory   = E:\
+
+[path]
+vms_list    = C:\Scripts\HyperV-Backup\Liste\vms_list.txt
+vms_except  = C:\Scripts\HyperV-Backup\Liste\vms_except.txt
+
+[backup]
+; Remote backup repository and restore points
+history     = 3
+directory   = \\backup.example.com\name-repository
+
+[mail]
+; Mail server configuration
+server      = mail.example.com
+port        = 587
+user        = backup-server@example.com
+# Mail-Adresse
+from        = backup-server@example.com
+to          = monitoring@example.de
