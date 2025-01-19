@@ -1,0 +1,5 @@
+# Ignore credential files
+psw-storage.txt
+
+# Ignore configuration files
+backup-hpv.ini
