@@ -1,0 +1,65 @@
+@startuml Backup-HPV(2 part)
+
+title Backup-HPV(2 part)
+!theme sunlust
+
+start
+
+if (result_backup_hpv == "new") then (yes)
+    :Set registry key "Result Backup-HPV(2 part)" to "Running";
+    :Write configuration details to log file;
+end if
+
+if (BackupDir exists AND WorkDir exists) then (yes)
+    repeat
+        :Copy data from WorkDir to BackupDir;
+        if (Copy successful) then (yes)
+            :Log copy success 
+            message;
+        else (no)
+            :Log copy error 
+            message;
+            :Sleep for 30 seconds;
+        end if
+    repeat while (if Error retry, count < 3)
+
+else (no)
+    :Log error for missing 
+    directories;
+end if
+
+:Search for "[ERROR]" in log file;
+
+if (Copy successful AND no errors in log) then (yes)
+    :Set registry key "Result Backup-HPV(2 part)" to "Success";
+    :Log success message;
+else (no)
+    :Set registry key "Result Backup-HPV(2 part)" to "Failure";
+    :Log error message;
+end if
+
+if (Export, Zip, and Copy finished) then (yes)
+    :Set registry key "Finished Backup-HPV" to True;
+else (no)
+    :Set registry key "Finished Backup-HPV" to False;
+end if
+
+if (Logging configured AND Backup finished) then (yes)
+    :Remove old backups based on retention policy;
+    :Add log finish entry;
+    if (SMTP server configured) then (yes)
+        if (SMTP password file exists) then (yes)
+            :Send email with log;
+            note right
+                Error handling for
+                email sending is
+                omitted for brevity
+            end note
+        else (no)
+            :Log error for missing SMTP password file;
+        end if
+    end if
+end if
+
+stop
+@enduml

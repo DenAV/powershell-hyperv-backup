@@ -1,0 +1,54 @@
+@startuml Backup-HPV(1 part)
+
+title Backup-HPV(1 part).ps1
+!theme sunlust
+
+start
+
+if (Test if backup-hpv.ini exists) then (yes)
+  :Get configuration from backup-hpv.ini;
+else (no)
+endif
+
+:Set LogPath;
+:Set variables for SMTP server;
+:Set variables for email;
+
+:Create Registry key;
+:Get short date format;
+
+while (For each VM to backup)
+  :Start-Copy_Daten function;
+  if (Source directory exists) then (yes)
+    if (Source is folder) then (yes)
+      :Get child folders;
+      :Get existing dest file names;
+      :Get small source files;
+      if (Small source files exist) then (yes)
+        :Log small source file errors;
+      endif
+      :Get files to copy;
+      if (Files to copy exist) then (yes)
+        :Copy each file;
+        if (Source and dest file sizes match) then (yes)
+          :Log successful copy;
+        else (no)
+          :Log copy error;
+        endif
+      endif
+    else (no)
+      :Copy file;
+    endif
+  else (no)
+    :Log source directory error;
+  endif
+  if (Copy was successful) then (yes)
+    :Compress backup;
+  else (no)
+  endif
+endwhile
+
+:Send email log;
+
+stop
+@enduml
