@@ -117,7 +117,7 @@ if (Test-Path $ModulePath) {
     exit 1
 }
 
-# Get Konfiguration
+# Get configuration from INI file
 if (Test-Path "$($path)\backup-hpv.ini") {
     
     $conf_ini = "$($path)\backup-hpv.ini" | Get-IniFile
@@ -127,27 +127,38 @@ if (Test-Path "$($path)\backup-hpv.ini") {
     
     $L_History = $conf_ini.local.history
     $R_History = $conf_ini.backup.history
+
+    # Read SMTP parameters from INI [mail] section
+    if ($conf_ini.mail) {
+        $SmtpServer = $conf_ini.mail.server
+        $SmtpPort = $conf_ini.mail.port
+        $SmtpUser = $conf_ini.mail.user
+        $MailFrom = $conf_ini.mail.from
+        $MailTo = $conf_ini.mail.to
+        if ($conf_ini.mail.pwd) {
+            $SmtpPwd = $conf_ini.mail.pwd
+        }
+    }
 }
 #################################################
 
 # Logging
 $LogPath = "$path\Logging"
 
-# Für Email Body
+# For Email body
 $CountError = 0
-$Job = "Backup-HPV (2 part) job: Die Aufgabe, sichern VMs auf dem $HPV_Host"
+$Job = "Backup-HPV (2 part) job: The task of backing up VMs on the $HPV_Host"
 
-# für SMTP-Server authentication
-$SmtpServer = 'mail.example.com'
-$SmtpPort = 587
+# Default SMTP server authentication (overridden by INI [mail] section)
+if (-not $SmtpServer) { $SmtpServer = 'mail.example.com' }
+if (-not $SmtpPort)   { $SmtpPort = 587 }
 $UseSsl = $True
-# Auth Absender
-$SmtpUser = 'backup-server@example.com'
-$SmtpPwd = "$path\pwd-storage.txt"
+if (-not $SmtpUser)   { $SmtpUser = 'backup-server@example.com' }
+if (-not $SmtpPwd)    { $SmtpPwd = "$path\pwd-storage.txt" }
 
-# Mail-Adresse
-$MailFrom = $SmtpUser
-$MailTo = 'monitoring@example.de'
+# Email address
+if (-not $MailFrom)   { $MailFrom = $SmtpUser }
+if (-not $MailTo)     { $MailTo = 'monitoring@example.de' }
 $MailSubject = $Null
 
 # Registry key

@@ -140,6 +140,18 @@ if ($ConfigFile) {
         
         $VmList = $conf_ini.path.vms_list
         $ExceptList = $conf_ini.path.vms_except
+
+        # Read SMTP parameters from INI [mail] section
+        if ($conf_ini.mail) {
+            $SmtpServer = $conf_ini.mail.server
+            $SmtpPort = $conf_ini.mail.port
+            $SmtpUser = $conf_ini.mail.user
+            $MailFrom = $conf_ini.mail.from
+            $MailTo = $conf_ini.mail.to
+            if ($conf_ini.mail.pwd) {
+                $SmtpPwd = $conf_ini.mail.pwd
+            }
+        }
     } else {
         Write-Error "Configuration file backup-hpv.ini not found!"
         exit 1
@@ -155,18 +167,17 @@ $LogPath = Join-Path -Path $ParentPath -ChildPath "Logging"
 $CountError = 0
 $Job = "Backup-HPV (1 part) job: The task of backing up VMs on the $HPV_Host"
 
-# for SMTP server authentication
-$SmtpServer = 'mail.example.com'
-$SmtpPort = 587
+# Default SMTP server authentication (overridden by INI [mail] section when -ConfigFile is used)
+if (-not $SmtpServer) { $SmtpServer = 'mail.example.com' }
+if (-not $SmtpPort)   { $SmtpPort = 587 }
 $UseSsl = $True
-# Sender
-$SmtpUser = 'backup-server@example.com'
+if (-not $SmtpUser)   { $SmtpUser = 'backup-server@example.com' }
 # File with encrypted password
-$SmtpPwd = Join-Path -Path $ParentPath -ChildPath "pwd-storage.txt"
+if (-not $SmtpPwd)    { $SmtpPwd = Join-Path -Path $ParentPath -ChildPath "pwd-storage.txt" }
 
 # Email address
-$MailFrom = $SmtpUser
-$MailTo = 'monitoring@example.de'
+if (-not $MailFrom)   { $MailFrom = $SmtpUser }
+if (-not $MailTo)     { $MailTo = 'monitoring@example.de' }
 $MailSubject = $Null
 
 # for 7-Zip
