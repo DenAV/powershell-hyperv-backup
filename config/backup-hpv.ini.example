@@ -19,6 +19,8 @@ directory   = \\backup.example.com\name-repository
 server      = mail.example.com
 port        = 587
 user        = backup-server@example.com
-# Mail-Adresse
+; Email addresses
 from        = backup-server@example.com
 to          = monitoring@example.de
+; Path to encrypted password file for SMTP authentication
+pwd         = C:\Scripts\HyperV-Backup\pwd-storage.txt
