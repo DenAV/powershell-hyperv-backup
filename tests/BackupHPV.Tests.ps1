@@ -290,10 +290,13 @@ Describe "Compress-VM" {
                 "dummy" | Set-Content (Join-Path $vmDir "disk.vhdx")
 
                 Mock Test-Path { return $false } -ParameterFilter { $Path -like "*TestVM-*.*z*" }
-                Mock Test-Path { return $true } -ParameterFilter { $Path -like "*Programme*" }
+                Mock Test-Path { return $false } -ParameterFilter { $Path -like "*Programme*" }
                 Mock Set-ItemProperty {}
                 Mock Write-Log {}
                 Mock Get-ChildItem { } -ParameterFilter { $Filter -like "tmp_*" }
+                Mock Get-ChildItem { } -ParameterFilter { $Filter -like "TestVM" }
+                Mock Get-Item { [PSCustomObject]@{ Length = 1024 } }
+                Mock Rename-Item {}
                 Mock Remove-Item {}
 
                 # The function should construct filename with short date
