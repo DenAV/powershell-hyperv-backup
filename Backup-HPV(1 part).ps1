@@ -117,6 +117,15 @@ $HPV_Host = $Env:ComputerName
 ## Set a variable for the path of the script.
 $ParentPath = [System.IO.Path]::GetDirectoryName($myInvocation.MyCommand.Definition)
 
+## Import the BackupHPV module with shared functions
+$ModulePath = Join-Path -Path $ParentPath -ChildPath "modules\BackupHPV\BackupHPV.psm1"
+if (Test-Path $ModulePath) {
+    Import-Module $ModulePath -Force
+} else {
+    Write-Error "BackupHPV module not found at: $ModulePath"
+    exit 1
+}
+
 if ($ConfigFile) {
     # Get configuration ini
     if (Test-Path (Join-Path -Path $ParentPath -ChildPath "backup-hpv.ini")) {
@@ -166,291 +175,8 @@ $Backup_Day = Get-DateShort
 # Path registry key for backup status
 $registory_key = "HKLM:\SOFTWARE\Backup-HPV"
 
-## Function Start-Copy_Daten — copies backup data using Robocopy.
-## Robocopy provides restartable mode, automatic retries, and built-in directory recursion.
-#
-Function Start-Copy_Daten {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory, ValueFromPipeline)] [string] $sourceDirPath, 
-        [Parameter(Mandatory)] [string] $destDirPath
-     )
-    process {
-        Write-Log -LogFile $LogFile -Type Info -Evt "Backup copy started for $($sourceDirPath)."
-        $copy_success = $False
-        Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Running" -Force | Out-Null
-
-        # Verify source path exists
-        if (-not (Test-Path -Path $sourceDirPath)) {
-            Write-Log -LogFile $LogFile -Type Err -Evt "Source path does not exist: $sourceDirPath"
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
-            return
-        }
-
-        if ((Get-Item -Path $sourceDirPath).PSIsContainer) {
-            # Pre-copy validation: check for suspiciously small VHD/VHDX files (< 100MB)
-            [string[]]$smallVhdFiles = @()
-            Get-ChildItem -Path $sourceDirPath -Recurse -File -ErrorAction Ignore |
-                Where-Object { $_.Extension -match '\.(vhdx?|avhdx?)$' -and $_.Length -lt 100MB } |
-                ForEach-Object {
-                    $smallVhdFiles += $_.Name
-                    Write-Log -LogFile $LogFile -Type Err -Evt "$($_.Name) is suspiciously small: $([string]::Format('{0:0.00} KB', $_.Length / 1KB))"
-                }
-
-            # Robocopy arguments:
-            #   /E     — copy subdirectories including empty ones
-            #   /Z     — restartable mode (resume on network failure)
-            #   /R:3   — retry 3 times on failure
-            #   /W:10  — wait 10 seconds between retries
-            #   /NP    — no progress percentage in output
-            #   /NDL   — no directory listing in log
-            #   /XF    — exclude tmp_* files
-            Write-Log -LogFile $LogFile -Type Info -Evt "Running Robocopy: $sourceDirPath -> $destDirPath"
-
-            $robocopyOutput = & robocopy.exe $sourceDirPath $destDirPath /E /Z /R:3 /W:10 /NP /NDL /XF tmp_* 2>&1
-            $robocopyExitCode = $LASTEXITCODE
-
-            # Robocopy exit codes:
-            #   0   — no files copied, no errors
-            #   1   — files copied successfully
-            #   2   — extra files/dirs detected in destination
-            #   4   — mismatched files detected
-            #   8   — some files could not be copied (error)
-            #   16  — fatal error, no files copied
-            # Codes 0-7 are considered successful
-            if ($robocopyExitCode -lt 8) {
-                $copy_success = $True
-                Write-Log -LogFile $LogFile -Type Succ -Evt "Robocopy completed successfully (exit code: $robocopyExitCode)."
-            }
-            else {
-                $copy_success = $False
-                Write-Log -LogFile $LogFile -Type Err -Evt "Robocopy failed with exit code: $robocopyExitCode."
-                # Log last lines of Robocopy output for diagnostics
-                $robocopyOutput | Select-Object -Last 5 | ForEach-Object {
-                    Write-Log -LogFile $LogFile -Type Err -Evt "Robocopy: $_"
-                }
-            }
-
-            # Fail the copy if suspiciously small VHD/VHDX files were detected
-            if ($smallVhdFiles.Count -gt 0 -and $copy_success) {
-                Write-Log -LogFile $LogFile -Type Err -Evt "Backup contains suspiciously small VHD/VHDX files — marking as failed."
-                $copy_success = $False
-            }
-        }
-        else {
-            # Source is a single file — use Robocopy for single file copy
-            $sourceDir = Split-Path -Path $sourceDirPath -Parent
-            $sourceFile = Split-Path -Path $sourceDirPath -Leaf
-
-            try {
-                & robocopy.exe $sourceDir $destDirPath $sourceFile /Z /R:3 /W:10 /NP 2>&1 | Out-Null
-                if ($LASTEXITCODE -lt 8) {
-                    $copy_success = $True
-                }
-                else {
-                    throw "Robocopy failed to copy file $sourceFile (exit code: $LASTEXITCODE)"
-                }
-            }
-            catch {
-                Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message
-                $copy_success = $False
-            }
-        }
-
-        # Set final result in registry
-        if ($copy_success) {
-            Write-Log -LogFile $LogFile -Type Info -Evt "Folder backed up successfully: $sourceDirPath."
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Success" -Force | Out-Null
-        }
-        else {
-            Write-Log -LogFile $LogFile -Type Err -Evt "Folder backup completed with errors: $sourceDirPath."
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
-        }
-    } # END Process
-} # END Function Start-Copy_Daten
-
-## Function Standard export starts here.
-#
-Function Export-StandardRunVM {
-    <#
-    .SYNOPSIS
-        Export virtual machines.
-    .DESCRIPTION
-        This function exports a virtual machine to a specified directory.
-    .PARAMETER ExportVmName
-        The name of the virtual machine to export.
-    .PARAMETER ExportDirectory
-        The directory to export the virtual machine to.
-    .PARAMETER LogFile
-        The log file to write logs to.
-    .PARAMETER RegistryKey
-        The registry key to write the export status to.
-    .NOTES
-        Requires Hyper-V PowerShell module.
-    .EXAMPLE
-        Export-StandardRunVM -ExportVmName "VM1" -ExportDirectory "C:\Exports" -LogFile "C:\Logs\export.log" -RegistryKey "HKLM:\SOFTWARE\MyApp"
-    #>
-    
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory=$True, ValueFromPipeline)]
-        [ValidateNotNullOrEmpty()]
-        [string]$ExportVmName,      # VM name to export
-        [Parameter(Mandatory=$True)][ValidateNotNullOrEmpty()]
-        [string]$ExportDirectory,   # Directory for exporting the VM
-        [Parameter(Mandatory=$True)][ValidateNotNullOrEmpty()]
-        [string]$RegistryKey,       # Registry key for writing the export status
-        [Parameter(Mandatory=$False)]
-        [string]$LogFile            # Log file for writing logs
-    )
-    process {
-        # Set the status of the export to false.
-        $StatusExport = $False
-
-        if (-not (Test-Path -Path $RegistryKey)) {
-            Write-Log -LogFile $LogFile -Type Err -Evt "Registry key $RegistryKey does not exist."
-            throw "Registry key $RegistryKey does not exist."
-        }
-        Set-ItemProperty -Path $RegistryKey -Name "Result Export" -Value "Running" -Force | Out-Null
-
-        $BackupPath = Join-Path -Path $ExportDirectory -ChildPath $ExportVmName
-
-        if (Test-Path -Path $BackupPath -PathType Container) {
-            Write-Log -LogFile $LogFile -Type Info -Evt "Removing existing backup folder for VM: $ExportVmName"
-            try {
-                Remove-Item -Path $BackupPath -Recurse -Force -ErrorAction Stop
-            } catch {
-                Write-Log -LogFile $LogFile -Type Err -Evt "Error deleting backup folder: $($_.Exception.Message)"
-                throw "Error deleting backup folder"
-            }
-        }
-
-        ## Export virtual machines
-        try {
-            Write-Log -LogFile $LogFile -Type Info -Evt "Attempting to export VM: $ExportVmName"
-            $ExportVmName | Export-VM -Path $ExportDirectory -ErrorAction 'Stop'
-            $StatusExport = $True
-        } catch {
-            Write-Log -LogFile $LogFile -Type Err -Evt "Export failed: $($_.Exception.Message)"
-            $StatusExport = $False
-        }
-
-    }
-    end {
-        # if completed
-        if ($StatusExport) {
-            Write-Log -LogFile $LogFile -Type Succ -Evt "VM: $ExportVmName exported successfully."
-            Set-ItemProperty -Path $RegistryKey -Name "Result Export" -Value "Success" -Force | Out-Null
-        } else {
-            Write-Log -LogFile $LogFile -Type Err -Evt "VM: $ExportVmName export failed."
-            Set-ItemProperty -Path $RegistryKey -Name "Result Export" -Value "Failure" -Force | Out-Null
-        }
-
-        return [PSCustomObject]@{
-            VMName       = $ExportVmName
-            ExportStatus = $StatusExport
-            Timestamp    = Get-Date
-        }
-    }
-} # END Function Standard export
-
-## Function Compress-VM  starts here.
-#
-Function Compress-VM {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)] [string]$VmName
-    )
-
-    Write-Log -LogFile $LogFile -Type Info -Evt "Compressing VM: $VmName backup using 7-Zip compression"
-
-    If ($ShortDate) {
-        $ShortDateT = Test-Path -Path ("$WorkDir\$VmName-$(Get-DateShort).*z*")
-
-        If ($ShortDateT) {
-            Write-Log -LogFile $LogFile -Type Info -Evt "File $VmName-$(Get-DateShort) already exists, appending number"
-            $i = 1
-            $ShortDateNN = ("$VmName-$(Get-DateShort)-{0:D3}" -f $i++)
-            $ShortDateExistT = Test-Path -Path "$WorkDir\$ShortDateNN.*z*"
-
-            If ($ShortDateExistT) {
-                do {
-                    $ShortDateNN = ("$VmName-$(Get-DateShort)-{0:D3}" -f $i++)
-                    $ShortDateExistT = Test-Path -Path "$WorkDir\$ShortDateNN.*z*"
-                } until ($ShortDateExistT -eq $false)
-            }
-
-            $ArchivName =  $ShortDateNN
-
-        }
-        $tmp_ArchivName = "tmp_$($VmName)-$(Get-DateShort)"
-        $ArchivName = "$VmName-$(Get-DateShort)"
-    }
-    else {
-        $tmp_ArchivName = "tmp_$($VmName)-$(Get-DateLong)"
-        $ArchivName = "$VmName-$(Get-DateLong)"
-    }
-
-    ## Test for 7zip being installed.
-    ## If it is, compress the backup folder, if it is not use Windows compression.
-    $path_7zip = "C:\Programme\7-Zip\7z.exe"
-    
-    If (Test-Path $path_7zip) {
-
-        if ($Encrypt -and (Test-Path -Path $SmtpPwd)) {
-
-            $SecurePassword = Get-Content $SmtpPwd | ConvertTo-SecureString
-            $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
-            $PwdEncrypt = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Running" -Force | Out-Null
-            & $path_7zip -$SzThreadNo -$SzCompL -bso0 a -t7z  -m0=LZMA2:d64k:fb32 -ms=8m -p"$PwdEncrypt" -mhe -- ("$WorkDir\$tmp_ArchivName") "$WorkDir\$VmName\*"
-                
-        } else {
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Running" -Force | Out-Null
-            & $path_7zip -$SzThreadNo -$SzCompL -bso0 a -t7z  -m0=LZMA2:d64k:fb32 -ms=8m -- ("$WorkDir\$tmp_ArchivName") "$WorkDir\$VmName\*"
-        }
-        
-        ## Rename tmp_* 7Z-Dateien
-        try {
-            Get-ChildItem -Path $WorkDir -Filter "$tmp_ArchivName.7z" -File | Rename-Item -NewName "$ArchivName.7z"
-
-            $zip_file_length = "$($WorkDir)\$ArchivName.7z" | Get-Item | Select-Object -ExpandProperty Length
-            Write-Log -LogFile $LogFile -Type Succ -Evt "VM: $VmName wurde erfolgreich als $ArchivName.7z ($([string]::Format("{0:0.00} KB", $zip_file_length/1KB))) gezippt"
-            
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Success" -Force | Out-Null
-        }
-        catch {
-            Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Failure" -Force | Out-Null
-        }
-        
-    }
-    ## Compressing Vm backup using Windows compression
-    else {
-        Add-Type -AssemblyName "system.io.compression.filesystem"
-        [io.compression.zipfile]::CreateFromDirectory("$WorkDir\$VmName", ("$WorkDir\$tmp_ArchivName.zip"))
-
-        ## Rename tmp_* ZIP-Dateien
-        try{
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Running" -Force | Out-Null
-
-            Get-ChildItem -Path $WorkDir -Filter "$tmp_ArchivName.zip" -File | Rename-Item -NewName "$ArchivName.zip"
-            $zip_file_length = "$($WorkDir)\$ArchivName.zip" | Get-Item | Select-Object -ExpandProperty Length
-            Write-Log -LogFile $LogFile -Type Succ -Evt "VM: $VmName wurde erfolgreich als $ArchivName.zip ($([string]::Format("{0:0.00} KB", $zip_file_length/1KB))) gezippt"
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Success" -Force | Out-Null
-        }
-        catch {
-            Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message
-
-            Set-ItemProperty -Path $registory_key -Name "Result Zippen" -Value "Failure" -Force | Out-Null
-        }
-    }
-    
-    ## Remove the VMs export folder.
-    Get-ChildItem -Path $WorkDir -Filter "$VmName" -Directory | Remove-Item -Recurse -Force
-} # END Function Compress-VM
-## ============================== ##
+## Functions Start-Copy_Daten, Export-StandardRunVM, and Compress-VM
+## are provided by the BackupHPV module (modules/BackupHPV/BackupHPV.psm1)
 
 ########################################
 ##          START the Skript          ##
@@ -675,7 +401,9 @@ else {
             try {
                 ## Run Zippen VM.
                 Set-ItemProperty -Path $registory_key -Name "Finished Zippen" -Value $False -Force | Out-Null
-                Compress-VM -VmName $_
+                Compress-VM -VmName $_ -WorkDir $WorkDir -LogFile $LogFile -RegistryKey $registory_key `
+                           -SzThreads $SzThreadNo -SzCompression $SzCompL -ShortDate:$ShortDate `
+                           -Encrypt:$Encrypt -EncryptionPwdFile $SmtpPwd
             }
             catch {
                 Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message

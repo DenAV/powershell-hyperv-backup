@@ -108,6 +108,15 @@ $HPV_Host = $Env:ComputerName
 $scriptFolder = [System.IO.Path]::GetDirectoryName($myInvocation.MyCommand.Definition)
 $path = $scriptFolder
 
+## Import the BackupHPV module with shared functions
+$ModulePath = Join-Path -Path $path -ChildPath "modules\BackupHPV\BackupHPV.psm1"
+if (Test-Path $ModulePath) {
+    Import-Module $ModulePath -Force
+} else {
+    Write-Error "BackupHPV module not found at: $ModulePath"
+    exit 1
+}
+
 # Get Konfiguration
 if (Test-Path "$($path)\backup-hpv.ini") {
     
@@ -144,124 +153,8 @@ $MailSubject = $Null
 # Registry key
 $registory_key = "HKLM:\SOFTWARE\Backup-HPV"
 
-#New-Item -Path "$registory_path\" -Name $registory_key -Force | Out-Null
-
-## ++++++++++++++++++++++++++++++ ##
-## Function Start-Copy_Daten — copies backup data using Robocopy.
-## Robocopy provides restartable mode, automatic retries, and built-in directory recursion.
-#
-Function Start-Copy_Daten {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory, ValueFromPipeline)] [string] $sourceDirPath, 
-        [Parameter(Mandatory)] [string] $destDirPath
-     )
-    process {
-        Write-Log -LogFile $LogFile -Type Info -Evt "Backup copy started for $($sourceDirPath)."
-        $copy_success = $False
-        Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Running" -Force | Out-Null
-
-        # Verify source path exists
-        if (-not (Test-Path -Path $sourceDirPath)) {
-            Write-Log -LogFile $LogFile -Type Err -Evt "Source path does not exist: $sourceDirPath"
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
-            return
-        }
-
-        if ((Get-Item -Path $sourceDirPath).PSIsContainer) {
-            # Pre-copy validation: check for suspiciously small VHD/VHDX files (< 100MB)
-            [string[]]$smallVhdFiles = @()
-            Get-ChildItem -Path $sourceDirPath -Recurse -File -ErrorAction Ignore |
-                Where-Object { $_.Extension -match '\.(vhdx?|avhdx?)$' -and $_.Length -lt 100MB } |
-                ForEach-Object {
-                    $smallVhdFiles += $_.Name
-                    Write-Log -LogFile $LogFile -Type Err -Evt "$($_.Name) is suspiciously small: $([string]::Format('{0:0.00} KB', $_.Length / 1KB))"
-                }
-
-            # Robocopy arguments:
-            #   /E     — copy subdirectories including empty ones
-            #   /Z     — restartable mode (resume on network failure)
-            #   /R:3   — retry 3 times on failure
-            #   /W:10  — wait 10 seconds between retries
-            #   /NP    — no progress percentage in output
-            #   /NDL   — no directory listing in log
-            #   /XF    — exclude tmp_* files
-            Write-Log -LogFile $LogFile -Type Info -Evt "Running Robocopy: $sourceDirPath -> $destDirPath"
-
-            $robocopyOutput = & robocopy.exe $sourceDirPath $destDirPath /E /Z /R:3 /W:10 /NP /NDL /XF tmp_* 2>&1
-            $robocopyExitCode = $LASTEXITCODE
-
-            # Robocopy exit codes:
-            #   0   — no files copied, no errors
-            #   1   — files copied successfully
-            #   2   — extra files/dirs detected in destination
-            #   4   — mismatched files detected
-            #   8   — some files could not be copied (error)
-            #   16  — fatal error, no files copied
-            # Codes 0-7 are considered successful
-            if ($robocopyExitCode -lt 8) {
-                $copy_success = $True
-                Write-Log -LogFile $LogFile -Type Succ -Evt "Robocopy completed successfully (exit code: $robocopyExitCode)."
-            }
-            else {
-                $copy_success = $False
-                Write-Log -LogFile $LogFile -Type Err -Evt "Robocopy failed with exit code: $robocopyExitCode."
-                # Log last lines of Robocopy output for diagnostics
-                $robocopyOutput | Select-Object -Last 5 | ForEach-Object {
-                    Write-Log -LogFile $LogFile -Type Err -Evt "Robocopy: $_"
-                }
-            }
-
-            # Fail the copy if suspiciously small VHD/VHDX files were detected
-            if ($smallVhdFiles.Count -gt 0 -and $copy_success) {
-                Write-Log -LogFile $LogFile -Type Err -Evt "Backup contains suspiciously small VHD/VHDX files — marking as failed."
-                $copy_success = $False
-            }
-
-            # Update "Finished Copy" based on overall backup pipeline status
-            if ($robocopyExitCode -eq 0 -and $smallVhdFiles.Count -eq 0) {
-                # No new files to copy and no errors — check if export and compression are done
-                if ((Get-ItemPropertyValue -Path $registory_key -Name "Finished Export") -eq $True `
-                    -and (Get-ItemPropertyValue -Path $registory_key -Name "Finished Zippen") -eq $True) {
-                    Set-ItemProperty -Path $registory_key -Name "Finished Copy" -Value $True -Force | Out-Null
-                }
-                else {
-                    Set-ItemProperty -Path $registory_key -Name "Finished Copy" -Value $False -Force | Out-Null
-                }
-            }
-        }
-        else {
-            # Source is a single file — use Robocopy for single file copy
-            $sourceDir = Split-Path -Path $sourceDirPath -Parent
-            $sourceFile = Split-Path -Path $sourceDirPath -Leaf
-
-            try {
-                & robocopy.exe $sourceDir $destDirPath $sourceFile /Z /R:3 /W:10 /NP 2>&1 | Out-Null
-                if ($LASTEXITCODE -lt 8) {
-                    $copy_success = $True
-                }
-                else {
-                    throw "Robocopy failed to copy file $sourceFile (exit code: $LASTEXITCODE)"
-                }
-            }
-            catch {
-                Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message
-                $copy_success = $False
-            }
-        }
-
-        # Set final result in registry
-        if ($copy_success) {
-            Write-Log -LogFile $LogFile -Type Info -Evt "Folder backed up successfully: $sourceDirPath."
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Success" -Force | Out-Null
-        }
-        else {
-            Write-Log -LogFile $LogFile -Type Err -Evt "Folder backup completed with errors: $sourceDirPath."
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
-        }
-    } # END Process
-} # END Function Start-Copy_Daten
-## ============================== ##
+## Function Start-Copy_Daten is provided by the BackupHPV module
+## (modules/BackupHPV/BackupHPV.psm1)
 
 ########################################
 ##          START the Skript          ##
@@ -407,7 +300,9 @@ if (($result_zippen -eq "Success" -or $result_zippen -eq "Running") -and ($finis
                         ## Run the Copy
                         Set-ItemProperty -Path $registory_key -Name "Finished Copy" -Value $False -Force | Out-Null
                         
-                        Start-Copy_Daten -sourceDirPath $WorkDir -destDirPath $Backup -ErrorAction 'Stop'
+                        Start-Copy_Daten -sourceDirPath $WorkDir -destDirPath $Backup `
+                                         -LogFile $LogFile -RegistryKey $registory_key `
+                                         -UpdatePipelineStatus -ErrorAction 'Stop'
                         if((Get-ItemPropertyValue -Path $registory_key -Name "Result Copy") -ne "Success" ) {
                             Write-Log -LogFile $LogFile -Type Err -Evt "Attempting to copy VM:$count_copy, Sleep 30"
                             $count_copy += 1
