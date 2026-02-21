@@ -310,9 +310,10 @@ Describe "Compress-VM" {
 Describe "Script syntax validation" {
 
     $scripts = @(
-        @{ Name = "Backup-HPV(1 part).ps1"; Path = (Join-Path $PSScriptRoot "..\Backup-HPV(1 part).ps1") }
-        @{ Name = "Backup-HPV(2 part).ps1"; Path = (Join-Path $PSScriptRoot "..\Backup-HPV(2 part).ps1") }
-        @{ Name = "BackupHPV.psm1";         Path = (Join-Path $PSScriptRoot "..\modules\BackupHPV\BackupHPV.psm1") }
+        @{ Name = "Backup-HPV(1 part).ps1";   Path = (Join-Path $PSScriptRoot "..\Backup-HPV(1 part).ps1") }
+        @{ Name = "Backup-HPV(2 part).ps1";   Path = (Join-Path $PSScriptRoot "..\Backup-HPV(2 part).ps1") }
+        @{ Name = "Backup-HPV(1-2 part).ps1"; Path = (Join-Path $PSScriptRoot "..\Backup-HPV(1-2 part).ps1") }
+        @{ Name = "BackupHPV.psm1";           Path = (Join-Path $PSScriptRoot "..\modules\BackupHPV\BackupHPV.psm1") }
     )
 
     It "<Name> should have valid PowerShell syntax" -ForEach $scripts {
