@@ -147,86 +147,82 @@ $registory_key = "HKLM:\SOFTWARE\Backup-HPV"
 #New-Item -Path "$registory_path\" -Name $registory_key -Force | Out-Null
 
 ## ++++++++++++++++++++++++++++++ ##
-## Function Start-Copy-Daten starts here.
+## Function Start-Copy_Daten — copies backup data using Robocopy.
+## Robocopy provides restartable mode, automatic retries, and built-in directory recursion.
 #
 Function Start-Copy_Daten {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory, ValueFromPipeline)] [string] $sourceDirPath, 
-        [Parameter(Mandatory)] [string] $destDirPath,
-        [switch]$Recurse = $False
+        [Parameter(Mandatory)] [string] $destDirPath
      )
     process {
-        
+        Write-Log -LogFile $LogFile -Type Info -Evt "Backup copy started for $($sourceDirPath)."
         $copy_success = $False
         Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Running" -Force | Out-Null
-        
-        # If the specified client directory is absent, create a new directory of the same name
-        if (![System.IO.Directory]::Exists("$destDirPath")) {
-            New-Item -Path $destDirPath -ItemType Directory | Out-Null
-            Write-Log -LogFile $LogFile -Type Info -Evt "Ordner wurde hergestellt: $($destDirPath)"
+
+        # Verify source path exists
+        if (-not (Test-Path -Path $sourceDirPath)) {
+            Write-Log -LogFile $LogFile -Type Err -Evt "Source path does not exist: $sourceDirPath"
+            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
+            return
         }
 
-            # If source folder or files
-        if ((Get-ItemProperty -Path $sourceDirPath).Attributes -eq 'Directory') {
-            
-            if ($Recurse) {
-                # copy subfolder
-                $folders = Get-ChildItem -Name -Path $sourceDirPath -Directory -Recurse -ErrorAction Ignore
-            }
-            
-            $destDirPath | Get-Item | Get-ChildItem | Where-Object {!$_.PSIsContainer} |
-                ForEach-Object {[string[]] $destFileNames += $_.PSChildName}
-
-            # size is shmall
-            $sourceDirPath | Get-Item | Get-ChildItem | 
-                Where-Object {!$_.PSIsContainer -and $_.Length -lt 100MB -and !($_.Name -like "tmp_*")} |
-                ForEach-Object {[string[]] $error_files += $_.PSChildName}
-
-            if ($error_files) {
-                $error_files | ForEach-Object {
-                    $error_file_length = "$($sourceDirPath)\$_" | Get-Item | Select-Object -ExpandProperty Length
-                    Write-Log -LogFile $LogFile -Type Err -Evt "$_ ... - ist zu klein $([string]::Format("{0:0.00} KB", $error_file_length/1KB))"
-                    $copy_success = $False
+        if ((Get-Item -Path $sourceDirPath).PSIsContainer) {
+            # Pre-copy validation: check for suspiciously small VHD/VHDX files (< 100MB)
+            [string[]]$smallVhdFiles = @()
+            Get-ChildItem -Path $sourceDirPath -Recurse -File -ErrorAction Ignore |
+                Where-Object { $_.Extension -match '\.(vhdx?|avhdx?)$' -and $_.Length -lt 100MB } |
+                ForEach-Object {
+                    $smallVhdFiles += $_.Name
+                    Write-Log -LogFile $LogFile -Type Err -Evt "$($_.Name) is suspiciously small: $([string]::Format('{0:0.00} KB', $_.Length / 1KB))"
                 }
-            }
-                
-            $copy_files = $sourceDirPath | Get-Item | Get-ChildItem | 
-                Where-Object {!$_.PSIsContainer -and !($_.Name -like "tmp_*") -and !($destFileNames -contains $_.PSChildName) -and !($error_files -contains $_.PSChildName) }
-                
-            if ($NULL -ne $copy_files) {
 
-                $copy_files | ForEach-Object {
-                    try {
-                        $source_length = "$($sourceDirPath)\$_" | Get-Item | Select-Object -ExpandProperty Length
-                        Write-Log -LogFile $LogFile -Type Info -Evt "Datei wird gesichert: $sourceDirPath\$_ ($([string]::Format("{0:0.00} KB", $source_length/1KB)))"
+            # Robocopy arguments:
+            #   /E     — copy subdirectories including empty ones
+            #   /Z     — restartable mode (resume on network failure)
+            #   /R:3   — retry 3 times on failure
+            #   /W:10  — wait 10 seconds between retries
+            #   /NP    — no progress percentage in output
+            #   /NDL   — no directory listing in log
+            #   /XF    — exclude tmp_* files
+            Write-Log -LogFile $LogFile -Type Info -Evt "Running Robocopy: $sourceDirPath -> $destDirPath"
 
-                        Copy-Item -Path "$($sourceDirPath)\$_" -Destination $destDirPath
-                        $dest_length = "$($destDirPath)\$_" | Get-Item | Select-Object -ExpandProperty Length
+            $robocopyOutput = & robocopy.exe $sourceDirPath $destDirPath /E /Z /R:3 /W:10 /NP /NDL /XF tmp_* 2>&1
+            $robocopyExitCode = $LASTEXITCODE
 
-                        if ($source_length -eq $dest_length) {
-                            Write-Log -LogFile $LogFile -Type Succ -Evt "wurde erfolgreich ($([string]::Format("{0:0.00} KB", $dest_length/1KB))) gesichert"
-                            $copy_success = $True
-                        }
-                        else {
-                            throw "ERROR ... $($sourceDirPath)\$_ wurde nicht richtig gesichert! Size for Remote und Lokale Dateien sind nicht gleich."
-                            $copy_success = $False
-                        }
-                    }
-                    catch {
-                        Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message
-                        $copy_success = $False
-                    }
-                }
-            }
-            else { 
-                # Daten für Sicherung nicht gefunden
+            # Robocopy exit codes:
+            #   0   — no files copied, no errors
+            #   1   — files copied successfully
+            #   2   — extra files/dirs detected in destination
+            #   4   — mismatched files detected
+            #   8   — some files could not be copied (error)
+            #   16  — fatal error, no files copied
+            # Codes 0-7 are considered successful
+            if ($robocopyExitCode -lt 8) {
                 $copy_success = $True
+                Write-Log -LogFile $LogFile -Type Succ -Evt "Robocopy completed successfully (exit code: $robocopyExitCode)."
+            }
+            else {
+                $copy_success = $False
+                Write-Log -LogFile $LogFile -Type Err -Evt "Robocopy failed with exit code: $robocopyExitCode."
+                # Log last lines of Robocopy output for diagnostics
+                $robocopyOutput | Select-Object -Last 5 | ForEach-Object {
+                    Write-Log -LogFile $LogFile -Type Err -Evt "Robocopy: $_"
+                }
+            }
 
-                ## "Finished Copy" ist "True" oder "False"
+            # Fail the copy if suspiciously small VHD/VHDX files were detected
+            if ($smallVhdFiles.Count -gt 0 -and $copy_success) {
+                Write-Log -LogFile $LogFile -Type Err -Evt "Backup contains suspiciously small VHD/VHDX files — marking as failed."
+                $copy_success = $False
+            }
+
+            # Update "Finished Copy" based on overall backup pipeline status
+            if ($robocopyExitCode -eq 0 -and $smallVhdFiles.Count -eq 0) {
+                # No new files to copy and no errors — check if export and compression are done
                 if ((Get-ItemPropertyValue -Path $registory_key -Name "Finished Export") -eq $True `
                     -and (Get-ItemPropertyValue -Path $registory_key -Name "Finished Zippen") -eq $True) {
-
                     Set-ItemProperty -Path $registory_key -Name "Finished Copy" -Value $True -Force | Out-Null
                 }
                 else {
@@ -234,39 +230,34 @@ Function Start-Copy_Daten {
                 }
             }
         }
-        else { # copy file
+        else {
+            # Source is a single file — use Robocopy for single file copy
+            $sourceDir = Split-Path -Path $sourceDirPath -Parent
+            $sourceFile = Split-Path -Path $sourceDirPath -Leaf
+
             try {
-                Copy-Item -Path $sourceDirPath -Destination $destDirPath -PassThru
-                $copy_success = $True
+                & robocopy.exe $sourceDir $destDirPath $sourceFile /Z /R:3 /W:10 /NP 2>&1 | Out-Null
+                if ($LASTEXITCODE -lt 8) {
+                    $copy_success = $True
+                }
+                else {
+                    throw "Robocopy failed to copy file $sourceFile (exit code: $LASTEXITCODE)"
+                }
             }
             catch {
                 Write-Log -LogFile $LogFile -Type Err -Evt $_.Exception.Message
                 $copy_success = $False
             }
         }
-        # IF unterordner 
-        if ($folders) {
-            foreach ($i in $folders) {
-                if (![System.IO.Directory]::Exists("$destDirPath\$i")) {
-                    New-Item $destDirPath\$i -ItemType Directory | Out-Null
-                }
-                if ([System.IO.Directory]::GetFiles("$sourceDirPath\$i").Count) {
-                    Start-Copy_Daten -sourceDirPath $sourceDirPath\$i -destDirPath $destDirPath\$i
-                }
-            }
-        }
 
-        # if has done
-        if (($copy_success -eq $True) -and $copy_files){
-            #Write-Log -LogFile $LogFile -Type Info -Evt "Ordner: $sourceDirPath wurde erfolgreich gesichert."
+        # Set final result in registry
+        if ($copy_success) {
+            Write-Log -LogFile $LogFile -Type Info -Evt "Folder backed up successfully: $sourceDirPath."
             Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Success" -Force | Out-Null
-        }
-        elseif (($copy_success -eq $False) -and $copy_files) {
-            #Write-Log -LogFile $LogFile -Type Err -Evt "Ordner: $sourceDirPath wurde mit Fehler gesichert!"
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
         }
         else {
-            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Success" -Force | Out-Null
+            Write-Log -LogFile $LogFile -Type Err -Evt "Folder backup completed with errors: $sourceDirPath."
+            Set-ItemProperty -Path $registory_key -Name "Result Copy" -Value "Failure" -Force | Out-Null
         }
     } # END Process
 } # END Function Start-Copy_Daten
